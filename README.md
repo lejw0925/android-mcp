@@ -11,7 +11,7 @@ UI 采用 Gemini 视觉体系（深邃底色 + 蓝→紫→粉能量渐变），
 - **工具级权限管控**：每个工具独立开关；敏感工具（短信/通讯录/通话/剪贴板/shell）默认关闭；Android 运行时权限未授予时返回明确错误并可在 App 内一键跳转授权
 - **无障碍模式**：读 UI 树（紧凑 JSON）、截图、点击/滑动/输入/全局按键、等待元素——无需 root
 - **实时反馈**：Live Update 通知（API 36+ Promoted Ongoing）、边缘粒子光效（按工具类别着色）、底部模糊胶囊
-- **远程隧道**：内置 cloudflared（quick / named tunnel）与 frpc（自建 frps），二进制已随 APK 打包（按 ABI 释放 + SHA256 校验），公网 Agent 也能连
+- **远程隧道**：内置 cloudflared（quick 临时域名 / 登录 Cloudflare 后创建并绑定自有域名的命名隧道）与 frpc（自建 frps），二进制已随 APK 打包（按 ABI 释放 + SHA256 校验），公网 Agent 也能连
 - **Shizuku（可选）**：`run_shell` / `logcat` / `settings` / `pm` 等 shell 级工具，等同 adb shell 权限
 
 ## 快速开始

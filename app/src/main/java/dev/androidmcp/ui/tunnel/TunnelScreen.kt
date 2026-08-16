@@ -1,5 +1,6 @@
 package dev.androidmcp.ui.tunnel
 
+import android.content.Intent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -35,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -50,10 +54,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.core.net.toUri
 import dev.androidmcp.tunnel.BinaryState
 import dev.androidmcp.tunnel.Binaries
+import dev.androidmcp.tunnel.CloudflaredConfig
+import dev.androidmcp.tunnel.LoginState
 import dev.androidmcp.tunnel.TunnelState
 import dev.androidmcp.ui.components.geminiDispersion
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -136,41 +144,45 @@ fun TunnelScreen(onBack: () -> Unit, vm: TunnelViewModel = hiltViewModel()) {
 private fun CloudflaredCard(vm: TunnelViewModel, onRequestEnable: () -> Unit) {
     val config by vm.cfConfig.collectAsStateWithLifecycle()
     val state by vm.cloudflared.state.collectAsStateWithLifecycle()
+    val loggedIn by vm.cloudflared.loggedIn.collectAsStateWithLifecycle()
+    val loginState by vm.cloudflared.loginState.collectAsStateWithLifecycle()
     val binState by vm.cfBinState.collectAsStateWithLifecycle()
     val logs by vm.cloudflared.logs.collectAsStateWithLifecycle()
     val busy = state is TunnelState.Running || state is TunnelState.Starting || state == TunnelState.Extracting
     val checked = config.enabled && state !is TunnelState.Stopped && state !is TunnelState.Error
+    val setupBusy = loginState is LoginState.WaitingAuth || loginState is LoginState.Working
+    val namedReady = loggedIn && config.tunnelId.isNotBlank() && config.routedHostname == config.hostname
+    val canToggle = !setupBusy && (checked || config.mode == "quick" || namedReady)
 
     TunnelCard(
         title = "Cloudflare Tunnel",
         subtitle = "cloudflared ${Binaries.CLOUDFLARED.version} · 无需自建服务器",
         checked = checked,
+        enabled = canToggle,
         onToggle = { if (it) onRequestEnable() else vm.disableCloudflared() },
     ) {
-        // 模式选择：quick 一键临时隧道 / named 用 token 跑命名隧道
+        // 模式选择：quick 一键临时隧道 / named 登录账户并绑定自有域名。
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 selected = config.mode == "quick",
                 onClick = { vm.setCfMode("quick") },
                 label = { Text("快速隧道") },
-                enabled = !busy,
+                enabled = !busy && !setupBusy,
             )
             FilterChip(
                 selected = config.mode == "named",
                 onClick = { vm.setCfMode("named") },
                 label = { Text("命名隧道") },
-                enabled = !busy,
+                enabled = !busy && !setupBusy,
             )
         }
         if (config.mode == "named") {
-            OutlinedTextField(
-                value = config.token,
-                onValueChange = vm::setCfToken,
-                label = { Text("Tunnel Token") },
-                placeholder = { Text("Cloudflare Zero Trust 控制台获取") },
-                singleLine = true,
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
+            NamedTunnelSection(
+                vm = vm,
+                config = config,
+                busy = busy,
+                loggedIn = loggedIn,
+                loginState = loginState,
             )
         } else {
             Text(
@@ -179,8 +191,164 @@ private fun CloudflaredCard(vm: TunnelViewModel, onRequestEnable: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        StatusSection(state = state, binState = binState, runningHint = "命名隧道已连接（域名请在 Cloudflare 控制台查看）")
+        StatusSection(state = state, binState = binState, runningHint = "命名隧道已连接")
         LogSection(logs = logs)
+    }
+}
+
+@Composable
+private fun NamedTunnelSection(
+    vm: TunnelViewModel,
+    config: CloudflaredConfig,
+    busy: Boolean,
+    loggedIn: Boolean,
+    loginState: LoginState,
+) {
+    val context = LocalContext.current
+    val setupBusy = loginState is LoginState.WaitingAuth || loginState is LoginState.Working
+    val canEdit = !busy && !setupBusy
+    val configured = config.tunnelId.isNotBlank() && config.routedHostname == config.hostname
+    var showLogoutConfirm by remember { mutableStateOf(false) }
+
+    LaunchedEffect(loginState) {
+        if (loginState is LoginState.Success) {
+            delay(1_500)
+            vm.acknowledgeCfLogin()
+        }
+    }
+
+    OutlinedTextField(
+        value = config.hostname,
+        onValueChange = vm::setCfHostname,
+        label = { Text("公网域名") },
+        placeholder = { Text("mcp.example.com") },
+        singleLine = true,
+        enabled = canEdit,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+        value = config.tunnelName,
+        onValueChange = vm::setCfTunnelName,
+        label = { Text("隧道名称") },
+        placeholder = { Text("androidmcp") },
+        singleLine = true,
+        enabled = canEdit,
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    if (!loggedIn) {
+        Text(
+            "域名需已托管到 Cloudflare；登录后由此设备创建隧道和 DNS 记录。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        when (loginState) {
+            is LoginState.WaitingAuth -> {
+                Text(
+                    "请在浏览器完成 Cloudflare 授权。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                SelectionContainer {
+                    Text(
+                        loginState.url,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, loginState.url.toUri()))
+                        }
+                    }) { Text("在浏览器中继续") }
+                    TextButton(onClick = vm::cancelCfLogin) { Text("取消") }
+                }
+            }
+            LoginState.Working -> {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text("正在准备 Cloudflare 授权…", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = vm::cancelCfLogin) { Text("取消") }
+                }
+            }
+            is LoginState.Error -> {
+                Text(
+                    "操作失败：${loginState.message}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Button(onClick = vm::loginCloudflared, enabled = !busy) { Text("重新登录 Cloudflare") }
+            }
+            LoginState.Idle, LoginState.Success -> {
+                Button(onClick = vm::loginCloudflared, enabled = !busy) { Text("登录 Cloudflare") }
+            }
+        }
+    } else {
+        Text(
+            "Cloudflare 已登录。本机凭据仅保存在应用私有目录。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        when (loginState) {
+            LoginState.Working -> {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text("正在创建或更新隧道…", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = vm::cancelCfLogin) { Text("取消") }
+                }
+            }
+            is LoginState.Error -> Text(
+                "操作失败：${loginState.message}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            LoginState.Success -> Text(
+                "本机隧道配置已更新。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            LoginState.Idle, is LoginState.WaitingAuth -> Unit
+        }
+        Button(
+            onClick = vm::provisionCloudflared,
+            enabled = !busy && !setupBusy,
+        ) {
+            Text(if (configured) "更新域名绑定" else "创建并绑定域名")
+        }
+        TextButton(
+            onClick = { showLogoutConfirm = true },
+            enabled = !busy && !setupBusy,
+        ) { Text("退出本机登录") }
+    }
+
+    if (showLogoutConfirm) {
+        AlertDialog(
+            onDismissRequest = { showLogoutConfirm = false },
+            title = { Text("退出 Cloudflare？") },
+            text = {
+                Text(
+                    "这会停止隧道并删除此设备上的证书、隧道凭据和本地配置。" +
+                        "Cloudflare 账户中的隧道和 DNS 记录不会被删除。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLogoutConfirm = false
+                    vm.logoutCloudflared()
+                }) { Text("退出并删除本机凭据") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogoutConfirm = false }) { Text("取消") }
+            },
+        )
     }
 }
 
@@ -248,6 +416,7 @@ private fun TunnelCard(
     title: String,
     subtitle: String,
     checked: Boolean,
+    enabled: Boolean = true,
     onToggle: (Boolean) -> Unit,
     content: @Composable () -> Unit,
 ) {
@@ -278,6 +447,7 @@ private fun TunnelCard(
                 Switch(
                     checked = checked,
                     onCheckedChange = onToggle,
+                    enabled = enabled,
                     modifier = Modifier.geminiDispersion(
                         shape = RoundedCornerShape(20.dp),
                         strength = 0.8f,

@@ -23,6 +23,11 @@ class TunnelViewModel @Inject constructor(
     installer: BinaryInstaller,
 ) : ViewModel() {
 
+    init {
+        // named 隧道不再使用旧版 Tunnel Token，打开页面时完成一次本地迁移清理。
+        viewModelScope.launch { repo.clearLegacyCloudflaredToken() }
+    }
+
     /** 本机 MCP 服务端口（只读，来自全局设置）。 */
     val port = settings.port.stateIn(viewModelScope, SharingStarted.Eagerly, 8080)
 
@@ -33,7 +38,18 @@ class TunnelViewModel @Inject constructor(
     val frpcBinState = installer.stateOf(Binaries.FRPC)
 
     fun setCfMode(value: String) = viewModelScope.launch { repo.setCloudflaredMode(value) }
-    fun setCfToken(value: String) = viewModelScope.launch { repo.setCloudflaredToken(value) }
+    fun setCfHostname(value: String) = viewModelScope.launch { repo.setCloudflaredHostname(value) }
+    fun setCfTunnelName(value: String) = viewModelScope.launch { repo.setCloudflaredTunnelName(value) }
+
+    fun loginCloudflared() = cloudflared.login()
+    fun cancelCfLogin() = cloudflared.cancelSetup()
+    fun provisionCloudflared() = cloudflared.provision()
+    fun acknowledgeCfLogin() = cloudflared.acknowledgeLoginState()
+
+    fun logoutCloudflared() = viewModelScope.launch {
+        repo.setCloudflaredEnabled(false)
+        cloudflared.logout()
+    }
 
     fun setFrpcAddr(value: String) = viewModelScope.launch { repo.setFrpcServerAddr(value) }
     fun setFrpcPort(value: Int) = viewModelScope.launch { repo.setFrpcServerPort(value) }
