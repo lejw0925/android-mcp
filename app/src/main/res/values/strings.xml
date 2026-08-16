@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android MCP</string>
+    <string name="accessibility_service_label">Android MCP 无障碍服务</string>
+    <string name="accessibility_service_description">允许 Android MCP 读取屏幕界面并执行自动化操作。</string>
+</resources>
