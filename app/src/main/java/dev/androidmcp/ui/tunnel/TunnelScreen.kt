@@ -471,10 +471,6 @@ private fun TunnelCard(
                     checked = checked,
                     onCheckedChange = onToggle,
                     enabled = enabled,
-                    modifier = Modifier.geminiDispersion(
-                        shape = RoundedCornerShape(20.dp),
-                        strength = 0.8f,
-                    ),
                 )
             }
             content()
