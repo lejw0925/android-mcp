@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -5,6 +7,20 @@ plugins {
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
 }
+
+val releaseSigningProperties = Properties().apply {
+    val propertiesFile = rootProject.file("keystore.properties")
+    if (propertiesFile.isFile) {
+        propertiesFile.inputStream().use(::load)
+    }
+}
+val releaseStoreFile = releaseSigningProperties
+    .getProperty("storeFile")
+    ?.takeIf { it.isNotBlank() }
+    ?.let { rootProject.file(it) }
+val hasReleaseSigning = releaseStoreFile?.isFile == true &&
+    listOf("storePassword", "keyAlias", "keyPassword")
+        .all { !releaseSigningProperties.getProperty(it).isNullOrBlank() }
 
 android {
     namespace = "dev.androidmcp"
@@ -16,11 +32,27 @@ android {
         minSdk = 31
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.0.1"
+    }
+
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = checkNotNull(releaseStoreFile)
+                storePassword = checkNotNull(releaseSigningProperties.getProperty("storePassword"))
+                keyAlias = checkNotNull(releaseSigningProperties.getProperty("keyAlias"))
+                keyPassword = checkNotNull(releaseSigningProperties.getProperty("keyPassword"))
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
     }
 
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
@@ -41,6 +73,7 @@ android {
     }
 
     buildFeatures {
+        buildConfig = true
         compose = true
     }
 
@@ -59,6 +92,16 @@ android {
                 "META-INF/notice.txt",
                 "META-INF/ASL2.0",
             )
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "packageRelease" || name == "bundleRelease") {
+        doFirst {
+            check(hasReleaseSigning) {
+                "Release signing is not configured. Create an ignored keystore.properties before building a release artifact."
+            }
         }
     }
 }

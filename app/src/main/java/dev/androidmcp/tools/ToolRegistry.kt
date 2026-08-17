@@ -1,5 +1,6 @@
 package dev.androidmcp.tools
 
+import dev.androidmcp.BuildConfig
 import dev.androidmcp.accessibility.A11yService
 import dev.androidmcp.data.SettingsRepository
 import dev.androidmcp.events.ToolCallEventBus
@@ -39,7 +40,7 @@ class ToolRegistry @Inject constructor(
     /** 构建一个会话级 MCP Server（每个 Streamable HTTP 会话一个）。 */
     fun createServer(keyLabel: String): Server {
         val server = Server(
-            serverInfo = Implementation(name = "android-mcp", version = "0.1.0"),
+            serverInfo = Implementation(name = "android-mcp", version = BuildConfig.VERSION_NAME),
             options = ServerOptions(
                 capabilities = ServerCapabilities(
                     tools = ServerCapabilities.Tools(listChanged = false),
