@@ -1,6 +1,7 @@
 package dev.androidmcp.ui.tunnel
 
 import android.content.Intent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -44,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -61,6 +63,7 @@ import dev.androidmcp.tunnel.CloudflaredConfig
 import dev.androidmcp.tunnel.LoginState
 import dev.androidmcp.tunnel.TunnelState
 import dev.androidmcp.ui.components.geminiDispersion
+import dev.androidmcp.util.QrCode
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -151,8 +154,9 @@ private fun CloudflaredCard(vm: TunnelViewModel, onRequestEnable: () -> Unit) {
     val busy = state is TunnelState.Running || state is TunnelState.Starting || state == TunnelState.Extracting
     val checked = config.enabled && state !is TunnelState.Stopped && state !is TunnelState.Error
     val setupBusy = loginState is LoginState.WaitingAuth || loginState is LoginState.Working
-    val namedReady = loggedIn && config.tunnelId.isNotBlank() && config.routedHostname == config.hostname
-    val canToggle = !setupBusy && (checked || config.mode == "quick" || namedReady)
+    // 运行已有固定域名隧道只需该隧道的凭据，不需要保留账户级 cert.pem。
+    val customReady = config.tunnelId.isNotBlank() && config.routedHostname == config.hostname
+    val canToggle = !setupBusy && (checked || config.mode == "quick" || customReady)
 
     TunnelCard(
         title = "Cloudflare Tunnel",
@@ -161,7 +165,7 @@ private fun CloudflaredCard(vm: TunnelViewModel, onRequestEnable: () -> Unit) {
         enabled = canToggle,
         onToggle = { if (it) onRequestEnable() else vm.disableCloudflared() },
     ) {
-        // 模式选择：quick 一键临时隧道 / named 登录账户并绑定自有域名。
+        // 模式选择：quick 一键临时隧道 / custom 由手机本机管理固定子域名。
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 selected = config.mode == "quick",
@@ -170,14 +174,14 @@ private fun CloudflaredCard(vm: TunnelViewModel, onRequestEnable: () -> Unit) {
                 enabled = !busy && !setupBusy,
             )
             FilterChip(
-                selected = config.mode == "named",
-                onClick = { vm.setCfMode("named") },
-                label = { Text("命名隧道") },
+                selected = config.mode == "custom",
+                onClick = { vm.setCfMode("custom") },
+                label = { Text("固定域名") },
                 enabled = !busy && !setupBusy,
             )
         }
-        if (config.mode == "named") {
-            NamedTunnelSection(
+        if (config.mode == "custom") {
+            CustomDomainSection(
                 vm = vm,
                 config = config,
                 busy = busy,
@@ -191,13 +195,13 @@ private fun CloudflaredCard(vm: TunnelViewModel, onRequestEnable: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        StatusSection(state = state, binState = binState, runningHint = "命名隧道已连接")
+        StatusSection(state = state, binState = binState, runningHint = "固定域名隧道已连接")
         LogSection(logs = logs)
     }
 }
 
 @Composable
-private fun NamedTunnelSection(
+private fun CustomDomainSection(
     vm: TunnelViewModel,
     config: CloudflaredConfig,
     busy: Boolean,
@@ -208,7 +212,10 @@ private fun NamedTunnelSection(
     val setupBusy = loginState is LoginState.WaitingAuth || loginState is LoginState.Working
     val canEdit = !busy && !setupBusy
     val configured = config.tunnelId.isNotBlank() && config.routedHostname == config.hostname
-    var showLogoutConfirm by remember { mutableStateOf(false) }
+    var hostnameDraft by remember(config.hostname) { mutableStateOf(config.hostname) }
+    var tunnelNameDraft by remember(config.tunnelName) { mutableStateOf(config.tunnelName) }
+    val targetChanged = hostnameDraft != config.hostname || tunnelNameDraft != config.tunnelName
+    var showDisconnectConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(loginState) {
         if (loginState is LoginState.Success) {
@@ -217,52 +224,68 @@ private fun NamedTunnelSection(
         }
     }
 
-    OutlinedTextField(
-        value = config.hostname,
-        onValueChange = vm::setCfHostname,
-        label = { Text("公网域名") },
-        placeholder = { Text("mcp.example.com") },
-        singleLine = true,
-        enabled = canEdit,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-        modifier = Modifier.fillMaxWidth(),
-    )
-    OutlinedTextField(
-        value = config.tunnelName,
-        onValueChange = vm::setCfTunnelName,
-        label = { Text("隧道名称") },
-        placeholder = { Text("androidmcp") },
-        singleLine = true,
-        enabled = canEdit,
-        modifier = Modifier.fillMaxWidth(),
-    )
+    // 登录等待期间字段不可编辑；收起它们以让二维码和操作按钮完整落在首屏。
+    if (!setupBusy) {
+        OutlinedTextField(
+            value = hostnameDraft,
+            onValueChange = { hostnameDraft = it },
+            label = { Text("固定子域名") },
+            placeholder = { Text("mcp.example.com") },
+            singleLine = true,
+            enabled = canEdit,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = tunnelNameDraft,
+            onValueChange = { tunnelNameDraft = it },
+            label = { Text("本机隧道名称") },
+            placeholder = { Text("androidmcp") },
+            singleLine = true,
+            enabled = canEdit,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (targetChanged) {
+            Button(onClick = { vm.saveCfCustomTarget(hostnameDraft, tunnelNameDraft) }) {
+                Text("保存子域名设置")
+            }
+        }
+    }
 
     if (!loggedIn) {
         Text(
-            "域名需已托管到 Cloudflare；登录后由此设备创建隧道和 DNS 记录。",
+            if (configured) {
+                "固定子域名已保留，可直接启动隧道。重新连接账户仅在创建或改绑时需要。"
+            } else {
+                "域名需已托管到 Cloudflare；连接账户后由手机创建隧道和 DNS CNAME。"
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         when (loginState) {
             is LoginState.WaitingAuth -> {
                 Text(
-                    "请在浏览器完成 Cloudflare 授权。",
+                    "用另一台已登录 Cloudflare 的设备扫描二维码，或在本机浏览器完成授权。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
+                val authorizationQr = remember(loginState.url) { QrCode.encode(loginState.url) }
+                Image(
+                    bitmap = authorizationQr,
+                    contentDescription = "Cloudflare 授权二维码",
+                    modifier = Modifier
+                        .size(160.dp)
+                        .clip(RoundedCornerShape(12.dp)),
+                )
                 SelectionContainer {
-                    Text(
-                        loginState.url,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Text(loginState.url, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
                         runCatching {
                             context.startActivity(Intent(Intent.ACTION_VIEW, loginState.url.toUri()))
                         }
-                    }) { Text("在浏览器中继续") }
+                    }) { Text("打开浏览器") }
                     TextButton(onClick = vm::cancelCfLogin) { Text("取消") }
                 }
             }
@@ -282,15 +305,15 @@ private fun NamedTunnelSection(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
-                Button(onClick = vm::loginCloudflared, enabled = !busy) { Text("重新登录 Cloudflare") }
+                Button(onClick = vm::loginCloudflared, enabled = !busy && !targetChanged) { Text("重新登录 Cloudflare") }
             }
             LoginState.Idle, LoginState.Success -> {
-                Button(onClick = vm::loginCloudflared, enabled = !busy) { Text("登录 Cloudflare") }
+                Button(onClick = vm::loginCloudflared, enabled = !busy && !targetChanged) { Text("登录 Cloudflare") }
             }
         }
     } else {
         Text(
-            "Cloudflare 已登录。本机凭据仅保存在应用私有目录。",
+            "Cloudflare 账户已连接。账户授权只用于创建或改绑；运行已绑定隧道只使用该隧道凭据。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -319,34 +342,34 @@ private fun NamedTunnelSection(
         }
         Button(
             onClick = vm::provisionCloudflared,
-            enabled = !busy && !setupBusy,
+            enabled = !busy && !setupBusy && !targetChanged,
         ) {
-            Text(if (configured) "更新域名绑定" else "创建并绑定域名")
+            Text(if (configured) "检查固定域名绑定" else "创建并绑定子域名")
         }
         TextButton(
-            onClick = { showLogoutConfirm = true },
+            onClick = { showDisconnectConfirm = true },
             enabled = !busy && !setupBusy,
-        ) { Text("退出本机登录") }
+        ) { Text("移除账户授权") }
     }
 
-    if (showLogoutConfirm) {
+    if (showDisconnectConfirm) {
         AlertDialog(
-            onDismissRequest = { showLogoutConfirm = false },
-            title = { Text("退出 Cloudflare？") },
+            onDismissRequest = { showDisconnectConfirm = false },
+            title = { Text("移除本机账户授权？") },
             text = {
                 Text(
-                    "这会停止隧道并删除此设备上的证书、隧道凭据和本地配置。" +
-                        "Cloudflare 账户中的隧道和 DNS 记录不会被删除。",
+                    "只会删除此手机上的 Cloudflare 账户证书。已保存的子域名、隧道 UUID 和该隧道凭据会保留，" +
+                        "现有隧道可继续运行或重启；创建或改绑时需重新登录。",
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
-                    showLogoutConfirm = false
-                    vm.logoutCloudflared()
-                }) { Text("退出并删除本机凭据") }
+                    showDisconnectConfirm = false
+                    vm.disconnectCloudflaredAccount()
+                }) { Text("移除授权") }
             },
             dismissButton = {
-                TextButton(onClick = { showLogoutConfirm = false }) { Text("取消") }
+                TextButton(onClick = { showDisconnectConfirm = false }) { Text("取消") }
             },
         )
     }

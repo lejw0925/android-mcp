@@ -16,14 +16,14 @@ private val Context.tunnelStore by preferencesDataStore(name = "tunnel")
 
 /**
  * cloudflared 配置：quick = 临时隧道（trycloudflare 随机域名）；
- * named = 登录 Cloudflare 账户后创建的命名隧道（hostname 绑定自有域名）。
+ * custom = 登录 Cloudflare 账户后在本机管理的固定域名隧道。
  */
 data class CloudflaredConfig(
     val enabled: Boolean = false,
     val mode: String = "quick",
-    /** named 模式绑定的公网域名，如 mcp.example.com。 */
+    /** custom 模式绑定的公网域名，如 mcp.example.com。 */
     val hostname: String = "",
-    /** 命名隧道名（cloudflared tunnel create 的名字）。 */
+    /** 本地管理隧道名（cloudflared tunnel create 的名字）。 */
     val tunnelName: String = "androidmcp",
     /** create 成功后回填的隧道 UUID。 */
     val tunnelId: String = "",
@@ -48,9 +48,11 @@ class TunnelRepository @Inject constructor(
     private val store = context.tunnelStore
 
     val cloudflaredConfig: Flow<CloudflaredConfig> = store.data.map { prefs ->
+        val savedMode = prefs[KEY_CF_MODE]
         CloudflaredConfig(
             enabled = prefs[KEY_CF_ENABLED] ?: false,
-            mode = prefs[KEY_CF_MODE] ?: "quick",
+            // "named" 是上一版已落盘的值，升级后无感迁移到更准确的 custom 模式。
+            mode = if (savedMode == "custom" || savedMode == "named") "custom" else "quick",
             hostname = prefs[KEY_CF_HOSTNAME] ?: "",
             tunnelName = prefs[KEY_CF_TUNNEL_NAME] ?: "androidmcp",
             tunnelId = prefs[KEY_CF_TUNNEL_ID] ?: "",
@@ -70,27 +72,30 @@ class TunnelRepository @Inject constructor(
 
     suspend fun setCloudflaredEnabled(value: Boolean) = store.edit { it[KEY_CF_ENABLED] = value }
     suspend fun setCloudflaredMode(value: String) = store.edit { prefs ->
-        prefs[KEY_CF_MODE] = if (value == "named") "named" else "quick"
-        // The former named-tunnel implementation stored a reusable tunnel token.
+        prefs[KEY_CF_MODE] = if (value == "custom" || value == "named") "custom" else "quick"
+        // The former token-based implementation stored a reusable tunnel token.
         // It is no longer consumed by this login-based flow, so remove it promptly.
         prefs.remove(KEY_CF_LEGACY_TOKEN)
     }
 
-    suspend fun setCloudflaredHostname(value: String) = store.edit { prefs ->
-        val hostname = CloudflaredSupport.normalizeHostname(value)
-        if (prefs[KEY_CF_HOSTNAME] != hostname) {
-            prefs[KEY_CF_HOSTNAME] = hostname
-            prefs.remove(KEY_CF_ROUTED_HOSTNAME)
-        }
-    }
+    /**
+     * Atomically store an intentional custom-domain edit.
+     *
+     * Text input stays in Compose state until this method is called. Persisting every keystroke
+     * launches competing DataStore edits and can reorder characters under fast input.
+     */
+    suspend fun setCloudflaredCustomTarget(hostnameValue: String, tunnelNameValue: String) = store.edit { prefs ->
+        val hostname = CloudflaredSupport.normalizeHostname(hostnameValue)
+        val tunnelName = tunnelNameValue.trim()
+        val hostnameChanged = prefs[KEY_CF_HOSTNAME] != hostname
+        val nameChanged = prefs[KEY_CF_TUNNEL_NAME] != tunnelName
 
-    suspend fun setCloudflaredTunnelName(value: String) = store.edit { prefs ->
-        val name = value.trim()
-        if (prefs[KEY_CF_TUNNEL_NAME] != name) {
-            prefs[KEY_CF_TUNNEL_NAME] = name
-            // A different name represents a different locally-managed tunnel.
-            prefs.remove(KEY_CF_TUNNEL_ID)
+        if (hostnameChanged) prefs[KEY_CF_HOSTNAME] = hostname
+        if (nameChanged) prefs[KEY_CF_TUNNEL_NAME] = tunnelName
+        if (hostnameChanged || nameChanged) {
+            // A new hostname needs a new DNS route; a new name is a different tunnel entirely.
             prefs.remove(KEY_CF_ROUTED_HOSTNAME)
+            if (nameChanged) prefs.remove(KEY_CF_TUNNEL_ID)
         }
     }
 
@@ -102,8 +107,8 @@ class TunnelRepository @Inject constructor(
     /** Remove the deprecated token after upgrading from the old named-tunnel flow. */
     suspend fun clearLegacyCloudflaredToken() = store.edit { it.remove(KEY_CF_LEGACY_TOKEN) }
 
-    /** 退出登录时清空 named 隧道配置（保留 enabled/mode）。 */
-    suspend fun clearCloudflaredNamed() = store.edit { prefs ->
+    /** 用户明确要求忘记固定域名配置时才调用（保留 enabled/mode）。 */
+    suspend fun clearCloudflaredCustomTarget() = store.edit { prefs ->
         prefs.remove(KEY_CF_HOSTNAME)
         prefs.remove(KEY_CF_TUNNEL_NAME)
         prefs.remove(KEY_CF_TUNNEL_ID)

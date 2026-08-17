@@ -17,7 +17,7 @@ import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** named 隧道登录/建站流程状态。 */
+/** Cloudflare 账户授权与固定域名绑定流程状态。 */
 sealed interface LoginState {
     data object Idle : LoginState
 
@@ -30,11 +30,12 @@ sealed interface LoginState {
 
 /**
  * cloudflared 隧道：quick 模式一条命令拿到 trycloudflare 随机域名；
- * named 模式登录 Cloudflare 账户（tunnel login → cert.pem），
- * 自动 create + route dns 建好命名隧道并绑定自有域名。
+ * custom 模式登录 Cloudflare 账户（tunnel login → cert.pem），
+ * 在本机执行 create + route dns，建立固定子域名到本机端口的出站隧道。
  *
  * 证书与隧道凭证（cert.pem / <id>.json）只存 [homeDir]（应用私有目录），
- * 通过 HOME 环境变量引导 cloudflared 写入该目录；退出登录时整目录物理删除。
+ * 通过 HOME 环境变量引导 cloudflared 写入该目录。账户证书与单隧道凭据分开保存：
+ * 移除账户授权时只删除 cert.pem，固定子域名和单隧道凭据会保留以便继续运行。
  */
 @Singleton
 class CloudflaredManager @Inject constructor(
@@ -57,7 +58,7 @@ class CloudflaredManager @Inject constructor(
     private val _loginState = MutableStateFlow<LoginState>(LoginState.Idle)
     val loginState: StateFlow<LoginState> = _loginState.asStateFlow()
 
-    /** named 模式运行时使用的公网域名（start 时从配置读取）。 */
+    /** custom 模式运行时使用的公网域名（start 时从配置读取）。 */
     @Volatile private var currentHostname: String? = null
 
     private class SetupOperation {
@@ -76,14 +77,10 @@ class CloudflaredManager @Inject constructor(
         scope.launch {
             try {
                 val cfg = repo.cloudflaredConfig.first()
-                val named = cfg.mode == "named"
-                if (named) {
+                val customDomain = cfg.mode == "custom"
+                if (customDomain) {
                     if (hasActiveSetup()) {
-                        _state.value = TunnelState.Error("命名隧道正在配置中，请完成后再开启")
-                        return@launch
-                    }
-                    if (!certFile.exists()) {
-                        _state.value = TunnelState.Error("请先登录 Cloudflare 账户")
+                        _state.value = TunnelState.Error("固定域名正在配置中，请完成后再开启")
                         return@launch
                     }
                     if (
@@ -92,7 +89,7 @@ class CloudflaredManager @Inject constructor(
                         cfg.routedHostname != cfg.hostname ||
                         !credentialsFile(cfg.tunnelId).isFile
                     ) {
-                        _state.value = TunnelState.Error("请先绑定域名并创建隧道")
+                        _state.value = TunnelState.Error("请先创建并绑定固定子域名")
                         return@launch
                     }
                 }
@@ -111,7 +108,7 @@ class CloudflaredManager @Inject constructor(
                         add(address)
                     }
                 }
-                val cmd = if (named) {
+                val cmd = if (customDomain) {
                     // 按当前端口重写 ingress，避免改端口后配置过期
                     writeConfig(cfg.tunnelId, cfg.hostname, port)
                     currentHostname = cfg.hostname
@@ -132,10 +129,16 @@ class CloudflaredManager @Inject constructor(
 
     /**
      * 登录 Cloudflare 账户：运行 `tunnel login`，把输出的授权 URL 交给 UI，
-     * 用户在本机浏览器授权后 cloudflared 自动下载 cert.pem，进程退出即完成。
+     * 用户可在本机浏览器或扫描同一 URL 的二维码完成授权；cloudflared 自动下载 cert.pem。
      */
     fun login() {
         launchSetup("登录") { operation ->
+            // cloudflared creates HOME/.cloudflared itself, but its Android build does not
+            // create a missing HOME parent. Make the app-private parent first.
+            if (!homeDir.isDirectory && !homeDir.mkdirs()) {
+                _loginState.value = LoginState.Error("无法创建 Cloudflare 凭据目录")
+                return@launchSetup
+            }
             val bin = installer.ensureInstalled(Binaries.CLOUDFLARED)
             val (code, lines) = execOnce(
                 operation,
@@ -232,17 +235,22 @@ class CloudflaredManager @Inject constructor(
         }
     }
 
-    /** 退出登录：停止隧道，物理删除证书与凭证，清空 named 配置。 */
-    fun logout() {
-        stop()
+    /**
+     * 移除账户级证书，但保留固定子域名与该隧道的凭据。
+     * cloudflared 运行既有隧道只需要 <uuid>.json；之后只有创建或改绑时才需重新登录。
+     */
+    fun disconnectAccount() {
         val pendingSetup = cancelActiveSetup()
-        _loggedIn.value = false
         _loginState.value = LoginState.Idle
-        currentHostname = null
         scope.launch {
             pendingSetup?.join()
-            homeDir.deleteRecursively()
-            repo.clearCloudflaredNamed()
+            if (certFile.exists() && !certFile.delete()) {
+                _loggedIn.value = certFile.exists()
+                _loginState.value = LoginState.Error("无法移除本机 Cloudflare 账户授权")
+                return@launch
+            }
+            _loggedIn.value = false
+            appendLog("已移除本机 Cloudflare 账户授权；固定子域名和隧道凭据已保留")
         }
     }
 
@@ -298,6 +306,13 @@ class CloudflaredManager @Inject constructor(
             }
             val code = p.waitFor()
             code to lines
+        } catch (e: Exception) {
+            // destroy() closes the stream on a different thread. Treat that IOException as
+            // a normal cancellation when it was initiated by cancelSetup()/disconnectAccount().
+            if (operation.job?.isCancelled == true) {
+                throw CancellationException("Cloudflare 配置已取消")
+            }
+            throw e
         } finally {
             if (operation.process === p) operation.process = null
         }
@@ -349,7 +364,7 @@ class CloudflaredManager @Inject constructor(
             _state.value = TunnelState.Running(match.value)
             return
         }
-        // named 模式：以连接注册成功作为运行标志，公网地址即绑定的域名
+        // 固定域名模式：以连接注册成功作为运行标志，公网地址即绑定的域名。
         if (line.contains("Registered tunnel connection") && _state.value !is TunnelState.Running) {
             _state.value = TunnelState.Running(currentHostname?.let { "https://$it" })
         }
