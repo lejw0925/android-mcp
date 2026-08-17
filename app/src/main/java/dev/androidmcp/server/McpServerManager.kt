@@ -20,11 +20,10 @@ import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.request.header
 import io.ktor.server.request.path
 import io.ktor.server.response.respond
-import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
+import io.modelcontextprotocol.kotlin.sdk.server.mcpStatelessStreamableHttp
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -33,13 +32,14 @@ data class ServerState(
     val running: Boolean = false,
     val port: Int = 8080,
     val addresses: List<String> = emptyList(),
-    val activeSessions: Int = 0,
+    val activeApiKeys: Int = 0,
     val lastError: String? = null,
 )
 
 /**
- * 内嵌 Ktor(CIO) + 官方 MCP Kotlin SDK 的 Streamable HTTP 服务。
+ * 内嵌 Ktor(CIO) + 官方 MCP Kotlin SDK 的无状态 Streamable HTTP 服务。
  * 鉴权：ApplicationCallPipeline 拦截 /mcp 路径，校验 Authorization: Bearer <apikey>。
+ * 无状态传输不要求 Mcp-Session-Id；活跃连接按 API Key 去重统计。
  * 注意关闭 SDK 默认的 DNS rebinding 保护（默认仅允许 localhost Host，LAN 访问会被拒）。
  */
 @Singleton
@@ -49,7 +49,7 @@ class McpServerManager @Inject constructor(
     private val toolRegistry: ToolRegistry,
 ) {
     private var engine: EmbeddedServer<*, *>? = null
-    private val sessionCount = AtomicInteger(0)
+    private val activeApiKeys = ActiveApiKeyConnections()
 
     private val _state = MutableStateFlow(ServerState())
     val state: StateFlow<ServerState> = _state
@@ -67,9 +67,9 @@ class McpServerManager @Inject constructor(
                     allowMethod(HttpMethod.Delete)
                     allowNonSimpleContentTypes = true
                     allowHeader(HttpHeaders.Authorization)
+                    // 保持旧客户端的预检兼容；服务端不会读取该头作为身份或会话依据。
                     allowHeader("Mcp-Session-Id")
                     allowHeader("Mcp-Protocol-Version")
-                    exposeHeader("Mcp-Session-Id")
                     exposeHeader("Mcp-Protocol-Version")
                 }
 
@@ -87,7 +87,10 @@ class McpServerManager @Inject constructor(
                             )
                             finish()
                         } else {
-                            context.attributes.put(KEY_LABEL_ATTR, key.label)
+                            context.attributes.put(
+                                AUTHENTICATED_KEY_ATTR,
+                                AuthenticatedApiKey(id = key.id, label = key.label),
+                            )
                         }
                     }
                 }
@@ -98,38 +101,33 @@ class McpServerManager @Inject constructor(
                             running = true,
                             port = port,
                             addresses = NetUtils.lanAddresses().map { ip -> "http://$ip:$port/mcp" },
+                            activeApiKeys = 0,
                             lastError = null,
                         )
                     }
                 }
                 environment.monitor.subscribe(ApplicationStopped) {
-                    _state.update { it.copy(running = false, activeSessions = 0) }
+                    activeApiKeys.clear()
+                    _state.update { it.copy(running = false, activeApiKeys = 0) }
                 }
 
-                mcpStreamableHttp(
+                mcpStatelessStreamableHttp(
                     path = "/mcp",
                     enableDnsRebindingProtection = false,
                 ) {
-                    val label = runCatching {
-                        call.attributes.getOrNull(KEY_LABEL_ATTR)
-                    }.getOrNull() ?: "unknown"
-                    toolRegistry.createServer(label).also { server ->
+                    val key = checkNotNull(call.attributes.getOrNull(AUTHENTICATED_KEY_ATTR)) {
+                        "Authenticated MCP request is missing its API key context"
+                    }
+                    toolRegistry.createServer(key.label).also { server ->
                         val counted = AtomicBoolean(false)
                         server.onConnect {
-                            // 传输建立不等于 MCP 会话成立；收到 initialized 后才计数。
-                            server.sessions.values.singleOrNull()?.onInitialized {
-                                if (counted.compareAndSet(false, true)) {
-                                    sessionCount.incrementAndGet()
-                                    _state.update { it.copy(activeSessions = sessionCount.get()) }
-                                }
+                            if (counted.compareAndSet(false, true)) {
+                                updateActiveApiKeyCount(activeApiKeys.acquire(key.id))
                             }
                         }
                         server.onClose {
                             if (counted.compareAndSet(true, false)) {
-                                val count = sessionCount.updateAndGet { current ->
-                                    (current - 1).coerceAtLeast(0)
-                                }
-                                _state.update { s -> s.copy(activeSessions = count) }
+                                updateActiveApiKeyCount(activeApiKeys.release(key.id))
                             }
                         }
                     }
@@ -146,14 +144,22 @@ class McpServerManager @Inject constructor(
     fun stop() {
         runCatching { engine?.stop(500, 1500) }
         engine = null
-        sessionCount.set(0)
-        _state.update { it.copy(running = false, activeSessions = 0) }
+        activeApiKeys.clear()
+        _state.update { it.copy(running = false, activeApiKeys = 0) }
     }
 
     fun isRunning(): Boolean = engine != null
 
+    private fun updateActiveApiKeyCount(count: Int) {
+        _state.update { it.copy(activeApiKeys = count) }
+    }
+
     companion object {
         private const val TAG = "McpServerManager"
-        private val KEY_LABEL_ATTR = io.ktor.util.AttributeKey<String>("mcp-key-label")
+        private val AUTHENTICATED_KEY_ATTR = io.ktor.util.AttributeKey<AuthenticatedApiKey>(
+            "authenticated-mcp-api-key",
+        )
     }
 }
+
+private data class AuthenticatedApiKey(val id: String, val label: String)

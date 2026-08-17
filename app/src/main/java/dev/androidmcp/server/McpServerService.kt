@@ -16,7 +16,7 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * MCP 前台服务：托管 [McpServerManager]，常驻通知展示端口/会话数/当前执行工具。
+ * MCP 前台服务：托管 [McpServerManager]，常驻通知展示端口/API Key 连接数/当前执行工具。
  *
  * 启动方式：context.startForegroundService(Intent(..., ACTION_START))。
  */
@@ -74,7 +74,7 @@ class McpServerService : LifecycleService() {
                 val active = events.active.value
                 val state = serverManager.state.value
                 if (settings.liveUpdateEnabled.first()) {
-                    NotificationHelper.update(this@McpServerService, state.port, state.activeSessions, active)
+                    NotificationHelper.update(this@McpServerService, state.port, state.activeApiKeys, active)
                 }
             }
         }

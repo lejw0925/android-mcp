@@ -118,7 +118,7 @@ fun DashboardScreen(
                                 color = if (state.running) GeminiPalette.Blue else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
-                                "端口 ${state.port} · ${state.activeSessions} 个活跃会话",
+                                "端口 ${state.port} · ${state.activeApiKeys} 个 API Key",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

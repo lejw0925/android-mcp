@@ -45,12 +45,12 @@ object NotificationHelper {
     /**
      * 常驻服务通知。有工具执行中（[active] 非空）时切换为 Live Update：
      * ProgressStyle 不确定进度条 + 文案「⟡ <tool>（来自 <keyLabel>）」，
-     * 并请求晋升为 Android 16+ 状态栏胶囊；无任务时回到基础端口/会话文案。
+     * 并请求晋升为 Android 16+ 状态栏胶囊；无任务时回到基础端口/API Key 连接文案。
      */
     fun buildServerNotification(
         context: Context,
         port: Int,
-        sessionCount: Int,
+        activeApiKeyCount: Int,
         active: ToolCallEvent?,
     ): Notification {
         val builder = NotificationCompat.Builder(context, CHANNEL_SERVER)
@@ -65,14 +65,14 @@ object NotificationHelper {
             builder.setContentText("⟡ ${active.displayName}（来自 ${active.keyLabel}）")
                 .setStyle(NotificationCompat.ProgressStyle().setProgressIndeterminate(true))
         } else {
-            builder.setContentText("端口 $port · $sessionCount 个会话")
+            builder.setContentText("端口 $port · $activeApiKeyCount 个 API Key")
         }
         return builder.build()
     }
 
-    fun update(context: Context, port: Int, sessionCount: Int, active: ToolCallEvent?) {
+    fun update(context: Context, port: Int, activeApiKeyCount: Int, active: ToolCallEvent?) {
         val nm = context.getSystemService(NotificationManager::class.java)
-        nm.notify(ID_SERVER, buildServerNotification(context, port, sessionCount, active))
+        nm.notify(ID_SERVER, buildServerNotification(context, port, activeApiKeyCount, active))
     }
 
     /** Agent 调用被权限拦截时的高优先级提醒，点击打开 App（弹窗由 App 内 pendingRequest 驱动）。 */
